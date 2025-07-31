@@ -186,102 +186,144 @@ SVCEOF
     # Wait for API service to be ready
     sleep 5
 
-    # Create directory structure for SSL certificates
-    mkdir -p /etc/pki/nginx/private
+    # Create directory for SSL certificates
+    mkdir -p /etc/nginx/ssl
 
     echo "Generating SSL certificates..."
 
-    # Generate the private key
-    openssl genrsa -out /etc/pki/nginx/private/server.key 2048
+    # Use the Elastic IP instead of EC2 public IP from metadata
+    ELASTIC_IP="${aws_eip.instance_eip.public_ip}"
+    echo "Using Elastic IP: $ELASTIC_IP"
 
-    # Generate the self-signed certificate
-    openssl req -new -x509 -key /etc/pki/nginx/private/server.key -out /etc/pki/nginx/server.crt -days 365 -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+    # Generate self-signed SSL certificate with simpler approach
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+      -keyout /etc/nginx/ssl/nginx.key \
+      -out /etc/nginx/ssl/nginx.crt \
+      -subj "/C=US/ST=State/L=City/O=Organization/CN=$ELASTIC_IP" \
+      -addext "subjectAltName=IP:$ELASTIC_IP"
 
-    # Set proper permissions
-    chmod 600 /etc/pki/nginx/private/server.key
-    chmod 644 /etc/pki/nginx/server.crt
+    # Verify certificate files were created
+    if [[ ! -f /etc/nginx/ssl/nginx.crt ]] || [[ ! -f /etc/nginx/ssl/nginx.key ]]; then
+        echo "ERROR: SSL certificate generation failed!"
+        echo "Attempting alternative certificate generation..."
+
+        # Alternative method without addext (for older OpenSSL versions)
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/nginx/ssl/nginx.key \
+          -out /etc/nginx/ssl/nginx.crt \
+          -subj "/C=US/ST=State/L=City/O=Organization/CN=$ELASTIC_IP"
+    fi
+
+    # Set proper permissions for the SSL certificate files
+    chmod 600 /etc/nginx/ssl/nginx.key
+    chmod 644 /etc/nginx/ssl/nginx.crt
 
     # Verify files exist and have content
-    if [[ -f /etc/pki/nginx/server.crt ]] && [[ -s /etc/pki/nginx/server.crt ]]; then
+    if [[ -f /etc/nginx/ssl/nginx.crt ]] && [[ -s /etc/nginx/ssl/nginx.crt ]]; then
         echo "SSL certificate created successfully"
-        ls -la /etc/pki/nginx/
-        ls -la /etc/pki/nginx/private/
+        ls -la /etc/nginx/ssl/
     else
         echo "ERROR: SSL certificate file is missing or empty!"
         exit 1
     fi
 
     # Create nginx configuration
-    cat > /etc/nginx/nginx.conf << 'NGINXEOF'
-user nginx;
-worker_processes auto;
-error_log /var/log/nginx/error.log;
-pid /run/nginx.pid;
+    cat > /etc/nginx/conf.d/api-proxy.conf << 'NGINXEOF'
+# HTTP server - redirect to HTTPS
+server {
+    listen 80;
+    server_name _;
 
-include /usr/share/nginx/modules/*.conf;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                      '$status $body_bytes_sent "$http_referer" '
-                      '"$http_user_agent" "$http_x_forwarded_for"';
-
-    access_log  /var/log/nginx/access.log  main;
-
-    sendfile            on;
-    tcp_nopush          on;
-    tcp_nodelay         on;
-    keepalive_timeout   65;
-    types_hash_max_size 4096;
-
-    include             /etc/nginx/mime.types;
-    default_type        application/octet-stream;
-
-    # HTTP Server Block (Port 80)
-    server {
-        listen       80;
-        listen       [::]:80;
-        server_name  _;
-        
-        location / {
-            proxy_pass http://127.0.0.1:${var.api_port};
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 60s;
-            proxy_read_timeout 60s;
-        }
+    location /api/kunal/helloworld {
+        return 301 https://$host$request_uri;
     }
 
-    # HTTPS Server Block (Port 443)
-    server {
-        listen       443 ssl;
-        listen       [::]:443 ssl;
-        http2        on;
-        server_name  _;
+    # Health check for HTTP
+    location /health {
+        access_log off;
+        return 200 "OK - HTTP";
+        add_header Content-Type text/plain;
+    }
+}
 
-        ssl_certificate "/etc/pki/nginx/server.crt";
-        ssl_certificate_key "/etc/pki/nginx/private/server.key";
-        ssl_session_cache shared:SSL:1m;
-        ssl_session_timeout  10m;
-        ssl_ciphers HIGH:!aNULL:!MD5;
-        ssl_prefer_server_ciphers on;
+# API backend definition with health check
+upstream api_backend {
+    server localhost:${var.api_port} max_fails=3 fail_timeout=30s;
+}
 
-        location / {
-            proxy_pass http://127.0.0.1:${var.api_port};
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            proxy_connect_timeout 60s;
-            proxy_send_timeout 60s;
-            proxy_read_timeout 60s;
-        }
+# HTTPS server with SSL termination
+server {
+    listen 443 ssl;
+    server_name _;
+
+    # Error logging
+    error_log /var/log/nginx/ssl_error.log warn;
+    access_log /var/log/nginx/ssl_access.log;
+
+    # SSL certificate files
+    ssl_certificate /etc/nginx/ssl/nginx.crt;
+    ssl_certificate_key /etc/nginx/ssl/nginx.key;
+
+    # SSL settings - more permissive configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    # Buffer size settings
+    ssl_buffer_size 8k;
+
+    # Additional SSL optimizations
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # Custom error pages
+    error_page 497 https://$host$request_uri;  # HTTP to HTTPS redirect
+    error_page 500 502 503 504 /50x.html;
+
+    # Static error page
+    location = /50x.html {
+        root /usr/share/nginx/html;
+        internal;
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "OK - HTTPS";
+        add_header Content-Type text/plain;
+    }
+
+    location /api/kunal/helloworld {
+        # Use the upstream with health check
+        proxy_pass http://api_backend/api/kunal/helloworld;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Proxy buffer settings
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+
+        # Proxy timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+
+        # Error handling
+        proxy_intercept_errors on;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+
+        # For SYN blackhole testing - return a 503 error when the API is unavailable
+        error_page 502 503 504 =503 /api_unavailable.html;
+    }
+
+    # Custom error page for API unavailability
+    location = /api_unavailable.html {
+        internal;
+        return 503 '{"error": "API service unavailable", "message": "The API service is currently unavailable. Please try again later."}';
+        add_header Content-Type application/json;
     }
 }
 NGINXEOF
@@ -341,4 +383,370 @@ resource "aws_eip" "instance_eip" {
 resource "aws_eip_association" "eip_assoc" {
   instance_id   = aws_instance.api_server.id
   allocation_id = aws_eip.instance_eip.id
+}
+
+# Security Group for Server A (Java Spring Boot client)
+resource "aws_security_group" "server_a_sg" {
+  name        = "${var.project_name}-server-a-sg"
+  description = "Allow SSH access and outbound traffic for Server A"
+  vpc_id      = aws_vpc.main.id
+
+  # SSH access
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SSH"
+  }
+
+  # Allow outbound traffic to communicate with Server B and internet
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound traffic"
+  }
+
+  tags = {
+    Name = "${var.project_name}-server-a-sg"
+  }
+}
+
+# EC2 Instance - Server A (Java Spring Boot client)
+resource "aws_instance" "server_a" {
+  ami                    = local.ami_id
+  instance_type          = "t3.nano"  # Using nano as requested
+  key_name               = var.key_name  # Same key as server B
+  subnet_id              = aws_subnet.public.id  # Same subnet as server B
+  vpc_security_group_ids = [aws_security_group.server_a_sg.id]
+
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e  # Exit on any error
+
+    # Log all output to a file for debugging
+    exec > /var/log/user-data-server-a.log 2>&1
+
+    echo "Starting Server A user data script execution..."
+
+    # Update system packages
+    yum update -y
+
+    # Install git
+    yum install -y git
+
+    # Install curl and zip (required for sdkman)
+    yum install -y curl zip unzip
+
+    # Create ec2-user home directory if it doesn't exist
+    mkdir -p /home/ec2-user
+    chown ec2-user:ec2-user /home/ec2-user
+
+    # Install SDKMAN as ec2-user
+    sudo -u ec2-user bash -c '
+      # Download and install SDKMAN
+      curl -s "https://get.sdkman.io" | bash
+      
+      # Source SDKMAN
+      source "/home/ec2-user/.sdkman/bin/sdkman-init.sh"
+      
+      # Install Java 17 (Amazon Corretto)
+      sdk install java 17.0.12-amzn
+      
+      # Install Gradle
+      sdk install gradle
+      
+      # Set Java 17 as default
+      sdk default java 17.0.12-amzn
+      
+      # Create .sdkmanrc file for the project
+      cat > /home/ec2-user/.sdkmanrc << "SDKEOF"
+# Enable auto-env through the sdkman_auto_env config
+# Add these lines to your project root directory
+java=17.0.12-amzn
+gradle=current
+SDKEOF
+      
+      # Verify installations
+      echo "=== Java Version ==="
+      java -version
+      
+      echo "=== Gradle Version ==="
+      gradle --version
+      
+      echo "=== Git Version ==="
+      git --version
+      
+      echo "=== SDKMAN Version ==="
+      sdk version
+    '
+
+    # Set proper ownership for ec2-user home directory
+    chown -R ec2-user:ec2-user /home/ec2-user
+
+    # Create a simple test script to verify Server B connectivity
+    cat > /home/ec2-user/test-server-b-connection.sh << 'TESTEOF'
+#!/bin/bash
+echo "Testing connection to Server B..."
+SERVER_B_IP="${aws_eip.instance_eip.public_ip}"
+
+echo "Testing HTTP connection (should redirect to HTTPS):"
+curl -v -L "http://$SERVER_B_IP/api/kunal/helloworld" || echo "HTTP test completed"
+
+echo ""
+echo "Testing HTTPS connection (with self-signed certificate):"
+curl -v -k "https://$SERVER_B_IP/api/kunal/helloworld" || echo "HTTPS test completed"
+
+echo ""
+echo "Server B IP: $SERVER_B_IP"
+echo "You can now clone your Spring Boot repository and configure it to call the API at:"
+echo "https://$SERVER_B_IP/api/kunal/helloworld"
+TESTEOF
+
+    chmod +x /home/ec2-user/test-server-b-connection.sh
+    chown ec2-user:ec2-user /home/ec2-user/test-server-b-connection.sh
+
+    # Create a welcome message for the user
+    cat > /home/ec2-user/README-SERVER-A.md << 'READMEEOF'
+# Server A - Java Spring Boot Client
+
+This server is configured with:
+- Git (for cloning repositories)
+- SDKMAN (Java and Gradle version management)
+- Java 17 (Amazon Corretto)
+- Gradle (latest version)
+
+## Getting Started
+
+1. **Test connection to Server B:**
+   ```bash
+   ./test-server-b-connection.sh
+   ```
+
+2. **Clone your Spring Boot repository:**
+   ```bash
+   git clone <your-github-repo-url>
+   cd <your-repo-directory>
+   ```
+
+3. **Use SDKMAN to manage Java/Gradle versions:**
+   ```bash
+   # Check current versions
+   sdk current
+   
+   # List available Java versions
+   sdk list java
+   
+   # Install a different version if needed
+   sdk install java <version>
+   ```
+
+4. **Build and run your Spring Boot application:**
+   ```bash
+   # If using Gradle wrapper
+   ./gradlew build
+   ./gradlew bootRun
+   
+   # Or using system Gradle
+   gradle build
+   gradle bootRun
+   ```
+
+## Server B API Endpoint
+- HTTP: http://SERVER_B_IP/api/kunal/helloworld (redirects to HTTPS)
+- HTTPS: https://SERVER_B_IP/api/kunal/helloworld
+
+Note: Server B uses a self-signed SSL certificate, so you may need to configure your Spring Boot application to accept it or use the `-k` flag with curl for testing.
+
+## SDKMAN Configuration
+A `.sdkmanrc` file has been created in your home directory with the default Java and Gradle versions. You can copy this to your project directory for consistent environment setup.
+READMEEOF
+
+    chown ec2-user:ec2-user /home/ec2-user/README-SERVER-A.md
+
+    echo "Server A user data script completed successfully"
+
+    # Final status check
+    echo "=== Final Setup Summary ==="
+    echo "Git installed: $(which git)"
+    echo "SDKMAN installed: $(ls -la /home/ec2-user/.sdkman/bin/sdkman-init.sh)"
+    echo "Java version: $(sudo -u ec2-user bash -c 'source /home/ec2-user/.sdkman/bin/sdkman-init.sh && java -version')"
+    echo "Gradle version: $(sudo -u ec2-user bash -c 'source /home/ec2-user/.sdkman/bin/sdkman-init.sh && gradle --version | head -3')"
+  EOF
+
+  tags = {
+    Name = "${var.project_name}-server-a"
+  }
+
+  # Wait for instance to be available
+  depends_on = [aws_internet_gateway.igw]
+}
+
+# ==============================================================================
+# AUTO SHUTDOWN/STARTUP FUNCTIONALITY FOR EC2 INSTANCES
+# ==============================================================================
+
+# IAM Role for Lambda functions to manage EC2 instances
+resource "aws_iam_role" "ec2_scheduler_lambda_role" {
+  name = "${var.project_name}-ec2-scheduler-lambda-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-ec2-scheduler-lambda-role"
+  }
+}
+
+# IAM Policy for Lambda to manage EC2 instances
+resource "aws_iam_policy" "ec2_scheduler_policy" {
+  name        = "${var.project_name}-ec2-scheduler-policy"
+  description = "Policy for Lambda to start/stop EC2 instances"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceStatus",
+          "ec2:StartInstances",
+          "ec2:StopInstances"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-ec2-scheduler-policy"
+  }
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "ec2_scheduler_policy_attachment" {
+  role       = aws_iam_role.ec2_scheduler_lambda_role.name
+  policy_arn = aws_iam_policy.ec2_scheduler_policy.arn
+}
+
+# Lambda function to stop EC2 instances
+resource "aws_lambda_function" "stop_ec2_instances" {
+  filename         = "stop_ec2_instances.zip"
+  function_name    = "${var.project_name}-stop-ec2-instances"
+  role            = aws_iam_role.ec2_scheduler_lambda_role.arn
+  handler         = "index.lambda_handler"
+  runtime         = "python3.9"
+  timeout         = 60
+
+  environment {
+    variables = {
+      INSTANCE_IDS = "${aws_instance.api_server.id},${aws_instance.server_a.id}"
+      END_DATE     = "2025-08-31"  # 1 month from July 31, 2025
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-stop-ec2-instances"
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.ec2_scheduler_policy_attachment]
+}
+
+# Lambda function to start EC2 instances
+resource "aws_lambda_function" "start_ec2_instances" {
+  filename         = "start_ec2_instances.zip"
+  function_name    = "${var.project_name}-start-ec2-instances"
+  role            = aws_iam_role.ec2_scheduler_lambda_role.arn
+  handler         = "index.lambda_handler"
+  runtime         = "python3.9"
+  timeout         = 60
+
+  environment {
+    variables = {
+      INSTANCE_IDS = "${aws_instance.api_server.id},${aws_instance.server_a.id}"
+      END_DATE     = "2025-08-31"  # 1 month from July 31, 2025
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-start-ec2-instances"
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.ec2_scheduler_policy_attachment]
+}
+
+# EventBridge rule to stop instances at midnight Sydney time (14:00 UTC)
+resource "aws_cloudwatch_event_rule" "stop_ec2_schedule" {
+  name                = "${var.project_name}-stop-ec2-schedule"
+  description         = "Stop EC2 instances at midnight Sydney time"
+  schedule_expression = "cron(0 14 * * ? *)"  # 14:00 UTC = 00:00 AEST (Sydney)
+
+  tags = {
+    Name = "${var.project_name}-stop-ec2-schedule"
+  }
+}
+
+# EventBridge rule to start instances at noon Sydney time (02:00 UTC)
+resource "aws_cloudwatch_event_rule" "start_ec2_schedule" {
+  name                = "${var.project_name}-start-ec2-schedule"
+  description         = "Start EC2 instances at noon Sydney time"
+  schedule_expression = "cron(0 2 * * ? *)"   # 02:00 UTC = 12:00 AEST (Sydney)
+
+  tags = {
+    Name = "${var.project_name}-start-ec2-schedule"
+  }
+}
+
+# EventBridge target for stop schedule
+resource "aws_cloudwatch_event_target" "stop_ec2_target" {
+  rule      = aws_cloudwatch_event_rule.stop_ec2_schedule.name
+  target_id = "StopEC2InstancesTarget"
+  arn       = aws_lambda_function.stop_ec2_instances.arn
+}
+
+# EventBridge target for start schedule
+resource "aws_cloudwatch_event_target" "start_ec2_target" {
+  rule      = aws_cloudwatch_event_rule.start_ec2_schedule.name
+  target_id = "StartEC2InstancesTarget"
+  arn       = aws_lambda_function.start_ec2_instances.arn
+}
+
+# Lambda permission for EventBridge to invoke stop function
+resource "aws_lambda_permission" "allow_eventbridge_stop" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.stop_ec2_instances.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.stop_ec2_schedule.arn
+}
+
+# Lambda permission for EventBridge to invoke start function
+resource "aws_lambda_permission" "allow_eventbridge_start" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.start_ec2_instances.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.start_ec2_schedule.arn
 }

@@ -193,6 +193,236 @@ To destroy the infrastructure when you're done:
 terraform destroy
 ```
 
+## Auto Shutdown/Startup System
+
+This infrastructure includes an automated EC2 instance scheduling system that automatically stops instances at midnight and starts them at noon Sydney time, running for exactly one month to optimize costs.
+
+### How the Workflow Works
+
+The auto shutdown/startup system operates through the following components:
+
+1. **EventBridge Rules**: Two cron-based schedules trigger Lambda functions
+   - **Stop Schedule**: `cron(0 14 * * ? *)` - Runs at 14:00 UTC (midnight Sydney time)
+   - **Start Schedule**: `cron(0 2 * * ? *)` - Runs at 02:00 UTC (noon Sydney time)
+
+2. **Lambda Functions**: Python-based functions that manage EC2 instances
+   - **Stop Function**: Stops running instances and logs the operation
+   - **Start Function**: Starts stopped instances and logs the operation
+
+3. **IAM Permissions**: Secure role-based access for Lambda functions to manage EC2 instances
+
+4. **End Date Protection**: Built-in logic prevents scheduling beyond August 31, 2025
+
+### Architecture Overview
+
+```
+EventBridge Rules (Cron)
+    ↓
+Lambda Functions (Python 3.9)
+    ↓
+EC2 API Calls (Start/Stop)
+    ↓
+CloudWatch Logs (Monitoring)
+```
+
+**Managed Instances:**
+- Server B (API Server): Nginx + Python Flask API
+- Server A (Java Client): Development environment with SDKMAN, Java 17, Gradle
+
+### Schedule Details
+
+| Action | Sydney Time | UTC Time | Cron Expression | Description |
+|--------|-------------|----------|-----------------|-------------|
+| STOP   | 12:00 AM    | 14:00    | `cron(0 14 * * ? *)` | Stop instances at midnight |
+| START  | 12:00 PM    | 02:00    | `cron(0 2 * * ? *)`  | Start instances at noon |
+
+**Important Notes:**
+- Schedule runs daily from July 31, 2025 to August 31, 2025
+- Timezone conversion: Sydney (AEST) = UTC + 10 hours
+- Functions automatically disable after the end date
+
+### Monitoring and Diagnostics
+
+#### Quick Status Check
+
+```bash
+# View scheduling configuration
+terraform output auto_shutdown_startup_summary
+
+# Check Lambda function names
+terraform output lambda_function_names
+
+# View EventBridge schedules
+terraform output eventbridge_schedules
+```
+
+#### Manual Testing
+
+```bash
+# Test stop function
+aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json
+cat response.json
+
+# Test start function
+aws lambda invoke --function-name kunal-api-demo-start-ec2-instances --payload '{}' response.json
+cat response.json
+```
+
+#### CloudWatch Monitoring
+
+1. **Lambda Function Logs:**
+   - Log Group: `/aws/lambda/kunal-api-demo-stop-ec2-instances`
+   - Log Group: `/aws/lambda/kunal-api-demo-start-ec2-instances`
+
+2. **EventBridge Rule Metrics:**
+   - Go to Amazon EventBridge Console
+   - Check rules: `kunal-api-demo-stop-ec2-schedule` and `kunal-api-demo-start-ec2-schedule`
+   - View execution history and metrics
+
+### Troubleshooting Guide
+
+#### Issue: Instances Not Stopping/Starting
+
+**Symptoms:**
+- Instances remain in the same state after scheduled time
+- No CloudWatch logs for Lambda execution
+
+**Diagnosis Steps:**
+
+1. **Check EventBridge Rules:**
+   ```bash
+   aws events list-rules --name-prefix kunal-api-demo
+   aws events list-targets-by-rule --rule kunal-api-demo-stop-ec2-schedule
+   ```
+
+2. **Verify Lambda Function Status:**
+   ```bash
+   aws lambda get-function --function-name kunal-api-demo-stop-ec2-instances
+   aws lambda get-function --function-name kunal-api-demo-start-ec2-instances
+   ```
+
+3. **Check IAM Permissions:**
+   ```bash
+   aws iam get-role --role-name kunal-api-demo-ec2-scheduler-lambda-role
+   aws iam list-attached-role-policies --role-name kunal-api-demo-ec2-scheduler-lambda-role
+   ```
+
+**Common Solutions:**
+- Ensure EventBridge rules are enabled
+- Verify Lambda functions have proper IAM permissions
+- Check if current date is past the end date (2025-08-31)
+
+#### Issue: Lambda Function Errors
+
+**Symptoms:**
+- CloudWatch logs show errors
+- Lambda function returns 4xx or 5xx status codes
+
+**Diagnosis Steps:**
+
+1. **Check CloudWatch Logs:**
+   ```bash
+   aws logs describe-log-groups --log-group-name-prefix /aws/lambda/kunal-api-demo
+   aws logs get-log-events --log-group-name /aws/lambda/kunal-api-demo-stop-ec2-instances --log-stream-name [LATEST_STREAM]
+   ```
+
+2. **Verify Instance IDs:**
+   ```bash
+   # Check if instances exist
+   aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+   ```
+
+3. **Test Manual Execution:**
+   ```bash
+   aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json
+   cat response.json
+   ```
+
+**Common Error Codes:**
+- `400`: Invalid instance IDs or end date format
+- `500`: AWS API errors or permission issues
+- `200`: Successful execution (check response body for details)
+
+#### Issue: Wrong Timezone Execution
+
+**Symptoms:**
+- Functions execute at incorrect Sydney time
+- Instances stop/start at unexpected hours
+
+**Diagnosis Steps:**
+
+1. **Verify Cron Expressions:**
+   - Stop: `cron(0 14 * * ? *)` should execute at 14:00 UTC = 00:00 Sydney
+   - Start: `cron(0 2 * * ? *)` should execute at 02:00 UTC = 12:00 Sydney
+
+2. **Check EventBridge Rule Configuration:**
+   ```bash
+   aws events describe-rule --name kunal-api-demo-stop-ec2-schedule
+   aws events describe-rule --name kunal-api-demo-start-ec2-schedule
+   ```
+
+**Note:** EventBridge uses UTC time. Sydney AEST = UTC + 10 hours.
+
+#### Issue: End Date Reached
+
+**Symptoms:**
+- Functions execute but no instances are stopped/started
+- Logs show "Scheduling period ended" message
+
+**Diagnosis:**
+- Check if current date > 2025-08-31
+- Review Lambda function logs for end date messages
+
+**Solution:**
+- Update the `END_DATE` environment variable in Lambda functions if you need to extend the schedule
+- Redeploy with `terraform apply` after updating the end date in `main.tf`
+
+### Emergency Controls
+
+#### Disable Scheduling Temporarily
+
+```bash
+# Disable stop schedule
+aws events disable-rule --name kunal-api-demo-stop-ec2-schedule
+
+# Disable start schedule
+aws events disable-rule --name kunal-api-demo-start-ec2-schedule
+```
+
+#### Re-enable Scheduling
+
+```bash
+# Enable stop schedule
+aws events enable-rule --name kunal-api-demo-stop-ec2-schedule
+
+# Enable start schedule
+aws events enable-rule --name kunal-api-demo-start-ec2-schedule
+```
+
+#### Manual Instance Control
+
+```bash
+# Manually stop instances
+aws ec2 stop-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+
+# Manually start instances
+aws ec2 start-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+
+# Check instance status
+aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name}'
+```
+
+### Cost Optimization
+
+The auto shutdown/startup system provides significant cost savings:
+- **12 hours offline daily** = ~50% cost reduction
+- **Automatic scheduling** = No manual intervention required
+- **Built-in end date** = Prevents runaway costs
+
+**Estimated Savings:**
+- t3.micro: ~$4.50/month → ~$2.25/month
+- t3.nano: ~$2.25/month → ~$1.13/month
+
 ## Files
 
 - `main.tf` - Main infrastructure definitions
@@ -200,3 +430,7 @@ terraform destroy
 - `outputs.tf` - Output definitions
 - `providers.tf` - Provider configuration
 - `params.tfvars` - Example variable values for deployment
+- `stop_ec2_instances.py` - Lambda function to stop EC2 instances
+- `start_ec2_instances.py` - Lambda function to start EC2 instances
+- `stop_ec2_instances.zip` - Packaged Lambda function for deployment
+- `start_ec2_instances.zip` - Packaged Lambda function for deployment
