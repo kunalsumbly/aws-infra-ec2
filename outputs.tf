@@ -13,24 +13,24 @@ output "instance_id" {
   value       = aws_instance.api_server.id
 }
 
-output "elastic_ip" {
-  description = "Elastic IP assigned to the EC2 instance"
-  value       = aws_eip.instance_eip.public_ip
+output "public_ip" {
+  description = "Public IP assigned to the EC2 instance"
+  value       = aws_instance.api_server.public_ip
 }
 
 output "ssh_command" {
   description = "SSH command to connect to the EC2 instance"
-  value       = "ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_eip.instance_eip.public_ip}"
+  value       = "ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_instance.api_server.public_ip}"
 }
 
 output "api_url_http" {
   description = "HTTP URL to access the API endpoint (redirects to HTTPS)"
-  value       = "http://${aws_eip.instance_eip.public_ip}/api/kunal/helloworld"
+  value       = "http://${aws_instance.api_server.public_ip}/api/kunal/helloworld"
 }
 
 output "api_url_https" {
   description = "HTTPS URL to access the API endpoint with SSL"
-  value       = "https://${aws_eip.instance_eip.public_ip}/api/kunal/helloworld"
+  value       = "https://${aws_instance.api_server.public_ip}/api/kunal/helloworld"
 }
 
 output "syn_blackhole_test_instructions" {
@@ -39,7 +39,7 @@ output "syn_blackhole_test_instructions" {
     To test the SYN blackhole scenario:
     
     1. Connect to the EC2 instance:
-       ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_eip.instance_eip.public_ip}
+       ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_instance.api_server.public_ip}
     
     2. Stop the Python API service:
        sudo systemctl stop kunal-api
@@ -102,7 +102,7 @@ output "server_a_setup_instructions" {
     - Java 17 (Amazon Corretto)
     - Gradle (latest version)
     
-    Server B API endpoint: https://${aws_eip.instance_eip.public_ip}/api/kunal/helloworld
+    Server B API endpoint: https://${aws_instance.api_server.public_ip}/api/kunal/helloworld
     
     Note: Server B uses a self-signed SSL certificate. Configure your Spring Boot 
     application accordingly or use curl with -k flag for testing.
@@ -116,9 +116,9 @@ output "infrastructure_summary" {
     
     Server B (API Server with Nginx):
     - Instance ID: ${aws_instance.api_server.id}
-    - Elastic IP: ${aws_eip.instance_eip.public_ip}
-    - SSH: ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_eip.instance_eip.public_ip}
-    - API Endpoint: https://${aws_eip.instance_eip.public_ip}/api/kunal/helloworld
+    - Public IP: ${aws_instance.api_server.public_ip}
+    - SSH: ssh -i /path/to/${var.key_name}.pem ec2-user@${aws_instance.api_server.public_ip}
+    - API Endpoint: https://${aws_instance.api_server.public_ip}/api/kunal/helloworld
     
     Server A (Java Spring Boot Client):
     - Instance ID: ${aws_instance.server_a.id}
@@ -202,21 +202,21 @@ output "monitoring_instructions" {
     
     🛠️  Manual Testing:
     # Test stop function
-    aws lambda invoke --function-name ${aws_lambda_function.stop_ec2_instances.function_name} --payload '{}' response.json
+    aws lambda invoke --function-name ${aws_lambda_function.stop_ec2_instances.function_name} --payload '{}' response.json --no-verify-ssl
     
     # Test start function  
-    aws lambda invoke --function-name ${aws_lambda_function.start_ec2_instances.function_name} --payload '{}' response.json
+    aws lambda invoke --function-name ${aws_lambda_function.start_ec2_instances.function_name} --payload '{}' response.json --no-verify-ssl
     
     ⚙️  Disable Scheduling (if needed):
     # Disable stop schedule
-    aws events disable-rule --name ${aws_cloudwatch_event_rule.stop_ec2_schedule.name}
+    aws events disable-rule --name ${aws_cloudwatch_event_rule.stop_ec2_schedule.name} --no-verify-ssl
     
     # Disable start schedule
-    aws events disable-rule --name ${aws_cloudwatch_event_rule.start_ec2_schedule.name}
+    aws events disable-rule --name ${aws_cloudwatch_event_rule.start_ec2_schedule.name} --no-verify-ssl
     
     # Re-enable schedules
-    aws events enable-rule --name ${aws_cloudwatch_event_rule.stop_ec2_schedule.name}
-    aws events enable-rule --name ${aws_cloudwatch_event_rule.start_ec2_schedule.name}
+    aws events enable-rule --name ${aws_cloudwatch_event_rule.stop_ec2_schedule.name} --no-verify-ssl
+    aws events enable-rule --name ${aws_cloudwatch_event_rule.start_ec2_schedule.name} --no-verify-ssl
     
     📝 CloudWatch Logs:
     - Log Group: /aws/lambda/${aws_lambda_function.stop_ec2_instances.function_name}

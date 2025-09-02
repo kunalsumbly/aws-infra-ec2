@@ -148,13 +148,44 @@ resource "aws_instance" "api_server" {
 
     # Create Python API script
     cat > /opt/kunal-api/app.py << 'PYEOF'
-from flask import Flask
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
 @app.route('/api/kunal/helloworld')
 def hello_world():
     return "hello world kunal"
+
+@app.route('/mcssapi-501/rp-webapp-9-common/billing/dashboard/billing-accounts', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+def billing_accounts():
+    # Accept all headers and request data
+    headers = dict(request.headers)
+    request_data = None
+    
+    # Try to get request data in various formats
+    try:
+        if request.is_json:
+            request_data = request.get_json()
+        elif request.form:
+            request_data = dict(request.form)
+        elif request.data:
+            request_data = request.data.decode('utf-8')
+    except:
+        pass
+    
+    # Log the received data (optional)
+    print(f"Received headers: {headers}")
+    print(f"Received data: {request_data}")
+    
+    # Always return the same JSON response regardless of input
+    return jsonify({
+        "ImplRetrieveBillingAccountsOutput": {
+            "transactionId": "049273e6-021c-4104-95ca-93188475a123",
+            "migratingAccount": False,
+            "billingAccountDetails": [],
+            "contactType": None
+        }
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=${var.api_port})
@@ -186,98 +217,25 @@ SVCEOF
     # Wait for API service to be ready
     sleep 5
 
-    # Create directory for SSL certificates
-    mkdir -p /etc/nginx/ssl
-
-    echo "Generating SSL certificates..."
-
-    # Use the Elastic IP instead of EC2 public IP from metadata
-    ELASTIC_IP="${aws_eip.instance_eip.public_ip}"
-    echo "Using Elastic IP: $ELASTIC_IP"
-
-    # Generate self-signed SSL certificate with simpler approach
-    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout /etc/nginx/ssl/nginx.key \
-      -out /etc/nginx/ssl/nginx.crt \
-      -subj "/C=US/ST=State/L=City/O=Organization/CN=$ELASTIC_IP" \
-      -addext "subjectAltName=IP:$ELASTIC_IP"
-
-    # Verify certificate files were created
-    if [[ ! -f /etc/nginx/ssl/nginx.crt ]] || [[ ! -f /etc/nginx/ssl/nginx.key ]]; then
-        echo "ERROR: SSL certificate generation failed!"
-        echo "Attempting alternative certificate generation..."
-
-        # Alternative method without addext (for older OpenSSL versions)
-        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-          -keyout /etc/nginx/ssl/nginx.key \
-          -out /etc/nginx/ssl/nginx.crt \
-          -subj "/C=US/ST=State/L=City/O=Organization/CN=$ELASTIC_IP"
-    fi
-
-    # Set proper permissions for the SSL certificate files
-    chmod 600 /etc/nginx/ssl/nginx.key
-    chmod 644 /etc/nginx/ssl/nginx.crt
-
-    # Verify files exist and have content
-    if [[ -f /etc/nginx/ssl/nginx.crt ]] && [[ -s /etc/nginx/ssl/nginx.crt ]]; then
-        echo "SSL certificate created successfully"
-        ls -la /etc/nginx/ssl/
-    else
-        echo "ERROR: SSL certificate file is missing or empty!"
-        exit 1
-    fi
+    echo "Skipping SSL certificate generation - HTTP only configuration"
 
     # Create nginx configuration
     cat > /etc/nginx/conf.d/api-proxy.conf << 'NGINXEOF'
-# HTTP server - redirect to HTTPS
-server {
-    listen 80;
-    server_name _;
-
-    location /api/kunal/helloworld {
-        return 301 https://$host$request_uri;
-    }
-
-    # Health check for HTTP
-    location /health {
-        access_log off;
-        return 200 "OK - HTTP";
-        add_header Content-Type text/plain;
-    }
-}
-
 # API backend definition with health check
 upstream api_backend {
     server localhost:${var.api_port} max_fails=3 fail_timeout=30s;
 }
 
-# HTTPS server with SSL termination
+# HTTP server - handle all requests directly
 server {
-    listen 443 ssl;
+    listen 80;
     server_name _;
 
     # Error logging
-    error_log /var/log/nginx/ssl_error.log warn;
-    access_log /var/log/nginx/ssl_access.log;
-
-    # SSL certificate files
-    ssl_certificate /etc/nginx/ssl/nginx.crt;
-    ssl_certificate_key /etc/nginx/ssl/nginx.key;
-
-    # SSL settings - more permissive configuration
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-    ssl_ciphers HIGH:!aNULL:!MD5;
-
-    # Buffer size settings
-    ssl_buffer_size 8k;
-
-    # Additional SSL optimizations
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
+    error_log /var/log/nginx/error.log warn;
+    access_log /var/log/nginx/access.log;
 
     # Custom error pages
-    error_page 497 https://$host$request_uri;  # HTTP to HTTPS redirect
     error_page 500 502 503 504 /50x.html;
 
     # Static error page
@@ -289,13 +247,39 @@ server {
     # Health check endpoint
     location /health {
         access_log off;
-        return 200 "OK - HTTPS";
+        return 200 "OK - HTTP";
         add_header Content-Type text/plain;
     }
 
     location /api/kunal/helloworld {
         # Use the upstream with health check
         proxy_pass http://api_backend/api/kunal/helloworld;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Proxy buffer settings
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+
+        # Proxy timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+
+        # Error handling
+        proxy_intercept_errors on;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+
+        # For SYN blackhole testing - return a 503 error when the API is unavailable
+        error_page 502 503 504 =503 /api_unavailable.html;
+    }
+
+    location /mcssapi-501/rp-webapp-9-common/billing/dashboard/billing-accounts {
+        # Use the upstream with health check
+        proxy_pass http://api_backend/mcssapi-501/rp-webapp-9-common/billing/dashboard/billing-accounts;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -371,19 +355,6 @@ NGINXEOF
   depends_on = [aws_internet_gateway.igw]
 }
 
-# Elastic IP
-resource "aws_eip" "instance_eip" {
-  domain = "vpc"
-  tags = {
-    Name = "${var.project_name}-eip"
-  }
-}
-
-# EIP Association
-resource "aws_eip_association" "eip_assoc" {
-  instance_id   = aws_instance.api_server.id
-  allocation_id = aws_eip.instance_eip.id
-}
 
 # Security Group for Server A (Java Spring Boot client)
 resource "aws_security_group" "server_a_sg" {
@@ -417,7 +388,7 @@ resource "aws_security_group" "server_a_sg" {
 # EC2 Instance - Server A (Java Spring Boot client)
 resource "aws_instance" "server_a" {
   ami                    = local.ami_id
-  instance_type          = "t3.nano"  # Using nano as requested
+  instance_type          = "t3.small"  # Upgraded from micro to small
   key_name               = var.key_name  # Same key as server B
   subnet_id              = aws_subnet.public.id  # Same subnet as server B
   vpc_security_group_ids = [aws_security_group.server_a_sg.id]
@@ -439,6 +410,20 @@ resource "aws_instance" "server_a" {
 
     # Install curl and zip (required for sdkman)
     yum install -y curl zip unzip
+
+    # Install Docker
+    yum install -y docker
+    
+    # Enable and start Docker service
+    systemctl enable docker
+    systemctl start docker
+    
+    # Add ec2-user to docker group so they can run docker commands without sudo
+    usermod -a -G docker ec2-user
+    
+    # Install Docker Compose
+    curl -L "https://github.com/docker/compose/releases/download/v2.21.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
 
     # Create ec2-user home directory if it doesn't exist
     mkdir -p /home/ec2-user
@@ -483,6 +468,16 @@ SDKEOF
       sdk version
     '
 
+    # Verify Docker and Docker Compose installations
+    echo "=== Docker Version ==="
+    docker --version
+    
+    echo "=== Docker Compose Version ==="
+    docker-compose --version
+    
+    echo "=== Docker Service Status ==="
+    systemctl status docker --no-pager
+
     # Set proper ownership for ec2-user home directory
     chown -R ec2-user:ec2-user /home/ec2-user
 
@@ -490,7 +485,7 @@ SDKEOF
     cat > /home/ec2-user/test-server-b-connection.sh << 'TESTEOF'
 #!/bin/bash
 echo "Testing connection to Server B..."
-SERVER_B_IP="${aws_eip.instance_eip.public_ip}"
+SERVER_B_IP="${aws_instance.api_server.public_ip}"
 
 echo "Testing HTTP connection (should redirect to HTTPS):"
 curl -v -L "http://$SERVER_B_IP/api/kunal/helloworld" || echo "HTTP test completed"
@@ -517,6 +512,8 @@ This server is configured with:
 - SDKMAN (Java and Gradle version management)
 - Java 17 (Amazon Corretto)
 - Gradle (latest version)
+- Docker (container runtime)
+- Docker Compose v2.21.0 (container orchestration)
 
 ## Getting Started
 
@@ -554,6 +551,32 @@ This server is configured with:
    gradle bootRun
    ```
 
+5. **Use Docker and Docker Compose:**
+   ```bash
+   # Check Docker installation
+   docker --version
+   docker-compose --version
+   
+   # Test Docker with hello-world
+   docker run hello-world
+   
+   # Build and run a containerized Spring Boot app (example)
+   # Create a Dockerfile in your project directory first
+   docker build -t my-spring-app .
+   docker run -p 8080:8080 my-spring-app
+   
+   # Use Docker Compose for multi-container applications
+   # Create a docker-compose.yml file first
+   docker-compose up -d
+   docker-compose down
+   
+   # View running containers
+   docker ps
+   
+   # View Docker logs
+   docker logs <container-id>
+   ```
+
 ## Server B API Endpoint
 - HTTP: http://SERVER_B_IP/api/kunal/helloworld (redirects to HTTPS)
 - HTTPS: https://SERVER_B_IP/api/kunal/helloworld
@@ -571,6 +594,9 @@ READMEEOF
     # Final status check
     echo "=== Final Setup Summary ==="
     echo "Git installed: $(which git)"
+    echo "Docker installed: $(which docker)"
+    echo "Docker Compose installed: $(which docker-compose)"
+    echo "Docker service status: $(systemctl is-active docker)"
     echo "SDKMAN installed: $(ls -la /home/ec2-user/.sdkman/bin/sdkman-init.sh)"
     echo "Java version: $(sudo -u ec2-user bash -c 'source /home/ec2-user/.sdkman/bin/sdkman-init.sh && java -version')"
     echo "Gradle version: $(sudo -u ec2-user bash -c 'source /home/ec2-user/.sdkman/bin/sdkman-init.sh && gradle --version | head -3')"
@@ -656,7 +682,7 @@ resource "aws_lambda_function" "stop_ec2_instances" {
   filename         = "stop_ec2_instances.zip"
   function_name    = "${var.project_name}-stop-ec2-instances"
   role            = aws_iam_role.ec2_scheduler_lambda_role.arn
-  handler         = "index.lambda_handler"
+  handler         = "stop_ec2_instances.lambda_handler"
   runtime         = "python3.9"
   timeout         = 60
 
@@ -679,7 +705,7 @@ resource "aws_lambda_function" "start_ec2_instances" {
   filename         = "start_ec2_instances.zip"
   function_name    = "${var.project_name}-start-ec2-instances"
   role            = aws_iam_role.ec2_scheduler_lambda_role.arn
-  handler         = "index.lambda_handler"
+  handler         = "start_ec2_instances.lambda_handler"
   runtime         = "python3.9"
   timeout         = 60
 

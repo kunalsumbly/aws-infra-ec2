@@ -260,11 +260,11 @@ terraform output eventbridge_schedules
 
 ```bash
 # Test stop function
-aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json
+aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json --no-verify-ssl
 cat response.json
 
 # Test start function
-aws lambda invoke --function-name kunal-api-demo-start-ec2-instances --payload '{}' response.json
+aws lambda invoke --function-name kunal-api-demo-start-ec2-instances --payload '{}' response.json --no-verify-ssl
 cat response.json
 ```
 
@@ -291,20 +291,20 @@ cat response.json
 
 1. **Check EventBridge Rules:**
    ```bash
-   aws events list-rules --name-prefix kunal-api-demo
-   aws events list-targets-by-rule --rule kunal-api-demo-stop-ec2-schedule
+   aws events list-rules --name-prefix kunal-api-demo --no-verify-ssl
+   aws events list-targets-by-rule --rule kunal-api-demo-stop-ec2-schedule --no-verify-ssl
    ```
 
 2. **Verify Lambda Function Status:**
    ```bash
-   aws lambda get-function --function-name kunal-api-demo-stop-ec2-instances
-   aws lambda get-function --function-name kunal-api-demo-start-ec2-instances
+   aws lambda get-function --function-name kunal-api-demo-stop-ec2-instances --no-verify-ssl
+   aws lambda get-function --function-name kunal-api-demo-start-ec2-instances --no-verify-ssl
    ```
 
 3. **Check IAM Permissions:**
    ```bash
-   aws iam get-role --role-name kunal-api-demo-ec2-scheduler-lambda-role
-   aws iam list-attached-role-policies --role-name kunal-api-demo-ec2-scheduler-lambda-role
+   aws iam get-role --role-name kunal-api-demo-ec2-scheduler-lambda-role --no-verify-ssl
+   aws iam list-attached-role-policies --role-name kunal-api-demo-ec2-scheduler-lambda-role --no-verify-ssl
    ```
 
 **Common Solutions:**
@@ -322,19 +322,19 @@ cat response.json
 
 1. **Check CloudWatch Logs:**
    ```bash
-   aws logs describe-log-groups --log-group-name-prefix /aws/lambda/kunal-api-demo
-   aws logs get-log-events --log-group-name /aws/lambda/kunal-api-demo-stop-ec2-instances --log-stream-name [LATEST_STREAM]
+   aws logs describe-log-groups --log-group-name-prefix /aws/lambda/kunal-api-demo --no-verify-ssl
+   aws logs get-log-events --log-group-name /aws/lambda/kunal-api-demo-stop-ec2-instances --log-stream-name [LATEST_STREAM] --no-verify-ssl
    ```
 
 2. **Verify Instance IDs:**
    ```bash
    # Check if instances exist
-   aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+   aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --no-verify-ssl
    ```
 
 3. **Test Manual Execution:**
    ```bash
-   aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json
+   aws lambda invoke --function-name kunal-api-demo-stop-ec2-instances --payload '{}' response.json --no-verify-ssl
    cat response.json
    ```
 
@@ -357,8 +357,8 @@ cat response.json
 
 2. **Check EventBridge Rule Configuration:**
    ```bash
-   aws events describe-rule --name kunal-api-demo-stop-ec2-schedule
-   aws events describe-rule --name kunal-api-demo-start-ec2-schedule
+   aws events describe-rule --name kunal-api-demo-stop-ec2-schedule --no-verify-ssl
+   aws events describe-rule --name kunal-api-demo-start-ec2-schedule --no-verify-ssl
    ```
 
 **Note:** EventBridge uses UTC time. Sydney AEST = UTC + 10 hours.
@@ -383,33 +383,33 @@ cat response.json
 
 ```bash
 # Disable stop schedule
-aws events disable-rule --name kunal-api-demo-stop-ec2-schedule
+aws events disable-rule --name kunal-api-demo-stop-ec2-schedule --no-verify-ssl
 
 # Disable start schedule
-aws events disable-rule --name kunal-api-demo-start-ec2-schedule
+aws events disable-rule --name kunal-api-demo-start-ec2-schedule --no-verify-ssl
 ```
 
 #### Re-enable Scheduling
 
 ```bash
 # Enable stop schedule
-aws events enable-rule --name kunal-api-demo-stop-ec2-schedule
+aws events enable-rule --name kunal-api-demo-stop-ec2-schedule --no-verify-ssl
 
 # Enable start schedule
-aws events enable-rule --name kunal-api-demo-start-ec2-schedule
+aws events enable-rule --name kunal-api-demo-start-ec2-schedule --no-verify-ssl
 ```
 
 #### Manual Instance Control
 
 ```bash
 # Manually stop instances
-aws ec2 stop-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+aws ec2 stop-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --no-verify-ssl
 
 # Manually start instances
-aws ec2 start-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25
+aws ec2 start-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --no-verify-ssl
 
 # Check instance status
-aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name}'
+aws ec2 describe-instances --instance-ids i-00367948d6a779b55 i-00bc3e80e1efa9e25 --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name}' --no-verify-ssl
 ```
 
 ### Cost Optimization
@@ -434,3 +434,54 @@ The auto shutdown/startup system provides significant cost savings:
 - `start_ec2_instances.py` - Lambda function to start EC2 instances
 - `stop_ec2_instances.zip` - Packaged Lambda function for deployment
 - `start_ec2_instances.zip` - Packaged Lambda function for deployment
+
+# Download certificate from IP
+openssl s_client -connect IP:PORT </dev/null 2>/dev/null | openssl x509 -outform PEM > server.crt
+
+# Then use it with curl
+curl --cacert server.crt https://IP:PORT/your-endpoint
+
+
+Use a Fake Domain Name + /etc/hosts mapping
+•  CN: test-server.fake or catalog-service.test
+•  Advantage: Most reliable, works with any client
+•  Setup: Add to /etc/hosts on client machines:
+  <current-server-ip> test-server.fake
+
+•  Usage: Always connect to https://test-server.fake:port
+
+I am thinking to use option 1, will it work for both curl and java clients ?
+
+Yes, **Option 1 (fake domain + /etc/hosts)** will work perfectly for both curl and Java clients! This is actually one of the most reliable approaches for testing.
+
+## How it works:
+
+### **For curl:**
+- curl resolves the hostname using the system's `/etc/hosts` file
+- When you connect to `https://test-server.fake`, curl looks up the IP in `/etc/hosts`
+- The SSL certificate CN matches the hostname, so handshake succeeds
+
+### **For Java clients:**
+- Java applications also use the system's hostname resolution (via `/etc/hosts`)
+- Java's SSL implementation validates the certificate CN against the hostname used in the connection
+- Since both match `test-server.fake`, validation passes
+
+## Setup steps:
+
+1. **Create certificate with fake domain:**
+   openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes \
+   -subj "/CN=test-server.fake"
+2. **Add to /etc/hosts on client machines:**
+   # Replace with your actual server IP
+   3.25.241.36 test-server.fake
+3. **Test with curl:**
+   curl -v --cacert server.crt https://test-server.fake/your-endpoint
+4. **Java clients:** Just use the URL `https://test-server.fake` and import the certificate into truststore if needed.
+
+## Advantages:
+- ✅ Works with any client (curl, Java, browsers, etc.)
+- ✅ No IP hardcoding in certificates
+- ✅ Easy to update when server IP changes (just update /etc/hosts)
+- ✅ No confusion with localhost/127.0.0.1
+
+Would you like me to help you create the certificate and set this up?
